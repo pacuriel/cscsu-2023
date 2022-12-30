@@ -3,6 +3,7 @@
 import numpy as np
 import networkx as nx
 from itertools import product
+import pandas as pd
 import multiprocessing as mp
 import time #IMPORTANT - if you choose to compare algorithms with respect to run time, you will need to know how this interacts with multiprocessing
 import glob
@@ -49,7 +50,7 @@ def parallelTests(jobs, func, procs=1): #NOTE: this assumes each job is a tuple
     pass
   return data
 
-#function to run experiments 
+#function to run experiments on graphs 
 def runTests(args):
   G, graphID, random_seed, size, graph_param_1, graph_param_2 = args #unpack the arguments, this will depend on what the jobs look like
 
@@ -94,58 +95,59 @@ def simSpread(G, infection_rate, random_seed, t_max): #this will require some pa
 #
 
 #function to generate random BA graphs with given params
-def genGraphsBA(size, m, graph_id):
+def genGraphsBA(size, m, graph_id, graph_type):
 
   random_seed = np.random.randint(0,999999) #random seed to generate graph
 
   G = nx.barabasi_albert_graph(size, m, random_seed) #generating random BA graph
 
-  return_tuple = tuple((G, graph_id, random_seed, size, m, None))
+  return_tuple = tuple((G, graph_id, graph_type, random_seed, size, m, None)) #tuple to return for experiments list
 
   #returns a tuple (Graph G, graph_id, random_seed,...)
   return return_tuple
 
 #function to generate random ER graphs with given params
-def genGraphsER(size, p, graph_id):
+def genGraphsER(size, p, graph_id, graph_type):
 
   random_seed = np.random.randint(0,999999) #random seed to generate graph
 
   G = nx.erdos_renyi_graph(size, p, random_seed) #generating random ER graph
 
-  return_tuple = tuple((G, graph_id, random_seed, size, p, None))
+  return_tuple = tuple((G, graph_id, graph_type, random_seed, size, p, None)) #tuple to return for experiments list
 
   #returns a tuple (Graph G, graph_id, random_seed,...)
   return return_tuple
 
 #function to generate random WS graphs with given params
-def genGraphsWS(size, k, p, graph_id):
+def genGraphsWS(size, k, p, graph_id, graph_type):
 
   random_seed = np.random.randint(0,999999) #random seed to generate graph
 
   G = nx.watts_strogatz_graph(size, k, p, random_seed) #generating random WS graph
 
-  #return k and p values in tuple?
-  return_tuple = tuple((G, graph_id, random_seed, size, p, k)) #tuple to return for experiments list
+  return_tuple = tuple((G, graph_id, graph_type, random_seed, size, p, k)) #tuple to return for experiments list
 
   #returns a tuple (Graph G, graph_id, random_seed, m,...)
   return return_tuple
 
 #function to generate graphs for simulation
 def genGraphs(sizes):
-  print("generating graphs for experiments")
-  experiments = [] #list of tuples to return 
-  #format of tuples: (graph, graph id, random seed, size, graph parameter 1, graph parameter 2)
+  print("generating graphs for experiments") #test output
+  
+  experiment_graphs = [] #list of tuples to return
+  #format of tuples: (graph, graph id, graph type, random seed, size, graph parameter 1, graph parameter 2)
+  #graph types: 0 = BA tree, 1 = BA dense, 2 = ER, 3 = WS, 4 = RW_1, 5 = RW_2, etc.
 
   #variables to track number of random graphs for experiments 
   num_sizes = len(sizes) #total number of random graph sizes
-  num_rand_g_types = 3 #total number of random graph types (random, real world, etc)
-  num_rand_g_per_size = 1 #total number of random graphs per size (UPDATE VALUE FOR EXPERIMENTS)
+  num_rand_g_types = 4 #total number of random graph types (BA tree, BA dense, ER, WS)
+  num_rand_g_per_size = 100 #total number of random graphs per size (UPDATE VALUE FOR EXPERIMENTS)
   num_rand_g_per_type = num_sizes * num_rand_g_per_size #total number of graphs per randon graph type
   total_rand_graphs = num_rand_g_per_type * num_rand_g_types #total number of graphs to generate
 
   graph_id = 0 #stores graph_id which relates to graph type
 
-  iter = 0 #iterator variable
+  graph_type = 0 #current graph type being generated
 
   #while loop to generate random graphs
   while graph_id < total_rand_graphs:
@@ -153,40 +155,84 @@ def genGraphs(sizes):
     #loop to create graph of each size listed
     for size in sizes:
 
-      for iter_2 in range(num_rand_g_per_size):
+      # loop to create (num_rand_g_per_size) graphs for each size
+      for iter in range(num_rand_g_per_size):
 
         #if-else statements to create graph type based on graph_id
         if (graph_id in range(0,num_rand_g_per_type)): #BA (tree)
-          m = 1 #m-value for tree BA graph?
+          m = 1 #m-value for BA tree graph
           
           #updating experiments list with new tuple
-          experiments.append(genGraphsBA(size, m, graph_id))
+          experiment_graphs.append(genGraphsBA(size, m, graph_id, graph_type))
         
         elif(graph_id in range(num_rand_g_per_type,2*num_rand_g_per_type)): #BA (dense)
-          m = 3 #m-value for dense BA graph
+          m = 3 #m-value for BA dense graph
 
           #updating experiments list with new tuple
-          experiments.append(genGraphsBA(size, m, graph_id))
+          experiment_graphs.append(genGraphsBA(size, m, graph_id, graph_type))
 
         elif(graph_id in range(2*num_rand_g_per_type,3*num_rand_g_per_type)): #ER
           p = (math.log(size) + 1) / size #setting p-value to be in connected regime
           
           #updating experiments list with new tuple
-          experiments.append(genGraphsER(size, p, graph_id))
+          experiment_graphs.append(genGraphsER(size, p, graph_id, graph_type))
+
+        elif(graph_id in range(3*num_rand_g_per_type,4*num_rand_g_per_type)): #WS
+          #parameter values for WS model
+          p = 0.4
+          k = 4
+
+          #updating experiments list with new tuple
+          experiment_graphs.append(genGraphsWS(size, k, p, graph_id, graph_type))
 
         graph_id += 1 #incrementing graph_id
-        iter += 1
     
-    
+    #sanity check
+    print("finished generating graph type:", graph_type)
+    graph_type += 1 #incrementing graph type
 
-    #cutoff point for generating random graphs (TBD)
-    # if (graph_id >= 3*num_sizes):
-    #   break
+  #generating real-world networks (FB wall posts, US airport, power grid)
 
-  #generate real-world networks below?
+  #Facebook wall posts network (largest connected component
+  #reading in FB network data using pandas
+  df = pd.read_csv("facebook-wosn-wall/out.facebook-wosn-wall", header=None, delimiter='\s+')
+  df.drop(df.columns[[2, 3]], axis = 1, inplace=True) #dropping last two columns
+  #generating network from dataframe (edge list)
+  FB_graph = nx.from_pandas_edgelist(df, source=0, target=1, edge_attr=None, create_using=nx.Graph)
+  #induced subgraph of largest connected component
+  FB_lcc = FB_graph.subgraph(max(nx.connected_components(FB_graph), key=len))
+  #adding FB graph to experiment graph list
+  experiment_graphs.append(tuple((FB_lcc, graph_id, graph_type, None, len(FB_lcc), None, None))) 
+  #sanity check
+  print("finished generating graph type:", graph_type)
+  graph_id += 1 #incrementing graph_id
+  graph_type += 1 #incrementing graph type
+
+  #US airport network
+  #reading in airport network data using pandas
+  df = pd.read_csv("opsahl-usairport/out.opsahl-usairport", header=None, delimiter='\s+')
+  df.drop(df.columns[[2]], axis = 1, inplace=True) #dropping last two columns
+  #generating network from dataframe (edge list)
+  us_airport_graph = nx.from_pandas_edgelist(df, source=0, target=1, edge_attr=None, create_using=nx.Graph)
+  #adding power grid graph to experiment graph list
+  experiment_graphs.append(tuple((us_airport_graph, graph_id, graph_type, None, len(us_airport_graph), None, None)))
+  #sanity check
+  print("finished generating graph type:", graph_type)
+  graph_id += 1 #incrementing graph_id
+  graph_type += 1 #incrementing graph type
+
+  #power grid network
+  #reading in the power grid graph
+  power_grid_graph = nx.read_gml("power/power.gml", label='id')
+  #adding power grid graph to experiment graph list
+  experiment_graphs.append(tuple((power_grid_graph, graph_id, graph_type, None, len(power_grid_graph), None, None)))
+  #sanity check
+  print("finished generating graph type:", graph_type)
+  graph_id += 1 #incrementing graph_id
+  graph_type += 1 #incrementing graph type
 
   #returns list of tuples with relevant graph info
-  return experiments
+  return experiment_graphs
 
 #
 if __name__=='__main__':
@@ -198,7 +244,7 @@ if __name__=='__main__':
   # R0 = [1.5]
   t_max = 15 #max time step to sim spread
   time_steps = [t for t in range (0,t_max)] #range of time steps to sim spread
-  infection_rates = []
+  infection_rates = [] #infection rates 
   repeats = 10 
   procs = 1
 
@@ -206,12 +252,21 @@ if __name__=='__main__':
   #for each random graph, it might be a good idea to use a specific random seed so that experiments are reproducible
   #a different seed for each graph can be generated with something like np.random.randint(0,999999)
   #these can be tuples that looks something like (graph id, random seed, ...)
-  experiments = []
-
-  experiments = genGraphs(sizes) #calling function to generate graphs of different sizes
+  experiment_graphs = genGraphs(sizes) #calling function to generate graphs to experiment on
 
   #test output
-  for exp in experiments:
-    print(exp)
+  # for exp in experiment_graphs:
+  #   print(exp)
 
-  newData = parallelTests(experiments, runTests, procs=procs)
+  graph_dict = {"graphs": experiment_graphs} #dictionary of graphs to experiment on
+  writeDict(graph_dict, "graph_dict.pickle") #saving graph dictionary to pickle file to avoid regeneration of graphs
+
+  # graph_dict = readDict("graph_dict.pickle") #obtaining dicitonary in pickle file
+  # experiment_graphs = graph_dict.values() #storing graphs to experiment on from pickle file
+  
+  #test output
+  # for list in graph_dict_test.values():
+  #   for val in list:
+  #     print(val)
+
+  # newData = parallelTests(experiment_graphs, runTests, procs=procs)
