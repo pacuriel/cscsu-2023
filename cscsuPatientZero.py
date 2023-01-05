@@ -46,12 +46,12 @@ def readDict_lzma(fileName):
 
 # Normalize the values of a given dictionary D
 def normalize_dict(D):
-  norm_dict = dict()
+  norm_dict = dict() 
 
   for i in D.keys():
-    if (sum(D.values()) == 0):
+    if (sum(D.values()) == 0): #avoiding division by zero
       norm_dict[i] = 0
-    else:
+    else: #normalizing about sum
       norm_dict[i] = float(D[i]) / sum(D.values())
 
   return norm_dict
@@ -60,12 +60,11 @@ def normalize_dict(D):
 def obtainProbs(G, centrality):
   temp_dict = dict() # Dictionary to store centrality
 
-  # Looping throguh nodes to update temp_dict
-  for v in G.nodes():
-    if (G.nodes[v]['state'] == 'R'):
-      temp_dict[v] = centrality[v]
+  #updating temp_dict with
+  for key in centrality:
+    temp_dict[key] = centrality[key]
 
-  # Normalizing to obtain probability dictionary
+  # Normalizing to obtain dicitonary with values between 0 and 1
   prob_dict = normalize_dict(temp_dict)
 
   return prob_dict
@@ -80,8 +79,37 @@ def aggregate_avg(probs_1, probs_2):
 
   return return_dict
 
+#function to return a dictionary of results similar to cosasi
+def averaged_cent_results(sorted_prob_dict, I, true_source_node):
+  
+  evaluate_dictionary = dict() #dictionary with method results to return
+
+  evaluate_dictionary['true source'] = [true_source_node] #true source of spread
+
+  estimated_source = list(sorted_prob_dict.keys())[0] #estimated source
+
+  #dictionary of all distances from true source
+  all_distance_dict = nx.shortest_path_length(I, true_source_node) 
+  #dictionary of estimated source's distance to true source
+  top_score_distance_dict = {estimated_source: all_distance_dict[estimated_source]} 
+  #storing distance dictionaries in result dictionary
+  evaluate_dictionary['distance'] = {"top score's distance": top_score_distance_dict, 'all distances': all_distance_dict}
+
+  rank = 1 #stores rank of true source node
+  #for loop to find rank of true source node
+  for key in sorted_prob_dict.keys():
+    if (key != true_source_node):
+      rank += 1
+    else:
+      break
+  
+  evaluate_dictionary['rank'] = rank #storing rank of true source node
+  evaluate_dictionary['rank %'] = float(rank / len(all_distance_dict)) #storing rank percentage of true source node
+
+  return evaluate_dictionary
+
 # Function to determine the source using various centrality measures of infected subgraph
-def findSource_aggregated_centralities(I):
+def averaged_centralities(I, true_source_node):
   prob_dict = dict() # Dictionary with probabilities (value) for each node (key)
 
   # Degree centrality
@@ -112,10 +140,10 @@ def findSource_aggregated_centralities(I):
   #sorting probabilities dictionary
   sorted_prob_dict = {k: v for k,v in sorted(prob_dict.items(), key=lambda item: item[1], reverse=True)}
 
-  #list of nodes by rank (rank[0] = predicted source)
-  rank = [x for x in sorted_prob_dict.keys()]
-
-  return rank
+  #storing dictionary of results of method
+  evaluation_results = averaged_cent_results(sorted_prob_dict, I, true_source_node)
+  
+  return evaluation_results
 
 #######################
 ### RUN EXPERIMENTS ###
@@ -137,18 +165,45 @@ def parallelTests(jobs, func, procs=1): #NOTE: this assumes each job is a tuple
     pass
   return data
 
+#function to obtain results from rumor centrality method
+def rumorCentrality(I, G, true_source):
+  #storing results from source inference method
+  result_rumor_cent = cosasi.single_source.rumor_centrality(I, G)
 
-def rumorCentrality():
-  pass
+  #storing dictionary of evaluation results (true source, distances, rank)
+  evaluation_results = result_rumor_cent.evaluate(true_source)
 
-def jordanCentrality():
-  pass
+  return evaluation_results
 
-def netsleuth():
-  pass
+#function to obtain results from jordan centrality method
+def jordanCentrality(I, G, true_source):
+  #storing results from source inference method
+  result_jordan_cent = cosasi.single_source.jordan_centrality(I, G)
 
-def lisn():
-  pass
+  #storing dictionary of evaluation results (true source, distances, rank)
+  evaluation_results = result_jordan_cent.evaluate(true_source)
+
+  return evaluation_results
+
+#function to obtain results from netsleuth method
+def netsleuth(I, G, true_source):
+  #storing results from source inference method
+  result_netsleuth = cosasi.single_source.netsleuth(I, G)
+
+  #storing dictionary of evaluation results (true source, distances, rank)
+  evaluation_results = result_netsleuth.evaluate(true_source)
+
+  return evaluation_results
+
+#function to obtain results from lisn method
+def lisn(I, G, true_source):
+  #storing results from source inference method
+  result_lisn = cosasi.single_source.lisn(I, G)
+
+  #storing dictionary of evaluation results (true source, distances, rank)
+  evaluation_results = result_lisn.evaluate(true_source)
+
+  return evaluation_results
 
 #function to run experiments on graphs 
 def runTests(args):
@@ -164,17 +219,21 @@ def runTests(args):
   #pick a random source
   #simulate spread from this source
   contagion = simSpread(G, infection_rate, t_max) #simulating spread
-  true_source_node = contagion.get_infected_indices(step=0)[0] #source of spread sim
-
-  true_source_cosasi = contagion.get_source() #cosasi 
+  true_source_node = contagion.get_source()[0] #source of spread sim
+  true_source_cosasi = contagion.get_source() #source node in list form (for cosasi methods)
   I = contagion.get_infected_subgraph(step=t_max) #storing infected subgraph at time-step t_max
 
   #apply algorithms to estimate/predict patient 0
   #collect metrics
+  evaluate_rumor_cent = rumorCentrality(I, G, true_source_cosasi)
+  evaluate_jordan_cent = jordanCentrality(I, G, true_source_cosasi)
+  evaluate_netsleuth = netsleuth(I, G, true_source_cosasi)
+  evaluate_lisn = lisn(I, G, true_source_cosasi)
+  evaluate_averaged_cent = averaged_centralities(I, true_source_node)
+
   #return results
-
-
-  
+  results_dict = {'rumor centrality': evaluate_rumor_cent, 'jordan centrality': evaluate_jordan_cent, 'netsleuth': evaluate_netsleuth,
+  'lisn': evaluate_lisn, 'averaged centrality': evaluate_averaged_cent}
 
 #######################
 ### SIMULATE SPREAD ###
