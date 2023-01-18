@@ -1,27 +1,15 @@
-#Template Python code for running experiments for CSCSU conference paper on identifying patient zero
-
 import numpy as np
 import networkx as nx
-from itertools import product
-import pandas as pd
 import multiprocessing as mp
-import time #IMPORTANT - if you choose to compare algorithms with respect to run time, you will need to know how this interacts with multiprocessing
-import glob
-import pickle
-import math
-import lzma
 import cosasi
+import copy
+import rumor_centrality_code
+import pandas as pd
+import pickle
 
-######################
-### SAVE/LOAD DATA ###
-######################
 #write a dictionary using the pickle function
 #input: d = dictionary to write to a file, outFile = file to save the dictionary to
 def writeDict(d, fileName):
-  with open(fileName, 'wb') as o:
-    pickle.dump(d, o, protocol=pickle.HIGHEST_PROTOCOL)
-
-def writeDict_lzma(d, fileName):
   with open(fileName, 'wb') as o:
     pickle.dump(d, o, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -34,581 +22,277 @@ def readDict(fileName):
     d = pickle.load(f)
   return d
 
-def readDict_lzma(fileName):
-  d = {}
-  with lzma.open(fileName, 'rb') as f:
-    d = pickle.load(f)
-  return d
-
-###
-### METHODS FOR AGGREGATED CENTRALITIES ###
-###
-
-# Normalize the values of a given dictionary D
-def normalize_dict(D):
-  norm_dict = dict() 
-
-  for i in D.keys():
-    if (sum(D.values()) == 0): #avoiding division by zero
-      norm_dict[i] = 0
-    else: #normalizing about sum
-      norm_dict[i] = float(D[i]) / sum(D.values())
-
-  return norm_dict
-
-# Function to obtain probabilities for specific nodes given centrality of all nodes
-def obtainProbs(G, centrality):
-  temp_dict = dict() # Dictionary to store centrality
-
-  #updating temp_dict with
-  for key in centrality:
-    temp_dict[key] = centrality[key]
-
-  # Normalizing to obtain dicitonary with values between 0 and 1
-  prob_dict = normalize_dict(temp_dict)
-
-  return prob_dict
-
-# Given 2 dictionaries with probabilities, aggregate them by calculating their average
-def aggregate_avg(probs_1, probs_2):
-  return_dict = dict() # Dictionary to return
-
-  # Looping through all keys in given dictionary    
-  for v in probs_1.keys():
-      return_dict[v] = np.average([probs_1[v], probs_2[v]])
-
-  return return_dict
-
-#function to return a dictionary of results similar to cosasi
-def averaged_cent_results(sorted_prob_dict, I, true_source_node):
-  
-  evaluate_dictionary = dict() #dictionary with method results to return
-
-  evaluate_dictionary['true source'] = [true_source_node] #true source of spread
-
-  estimated_source = list(sorted_prob_dict.keys())[0] #estimated source
-
-  #dictionary of all distances from true source
-  all_distance_dict = nx.shortest_path_length(I, true_source_node) 
-  #dictionary of estimated source's distance to true source
-  top_score_distance_dict = {estimated_source: all_distance_dict[estimated_source]} 
-  #storing distance dictionaries in result dictionary
-  evaluate_dictionary['distance'] = {"top score's distance": top_score_distance_dict, 'all distances': all_distance_dict}
-
-  rank = 1 #stores rank of true source node
-  #for loop to find rank of true source node
-  for key in sorted_prob_dict.keys():
-    if (key != true_source_node):
-      rank += 1
-    else:
-      break
-  
-  evaluate_dictionary['rank'] = rank #storing rank of true source node
-  evaluate_dictionary['rank %'] = float(rank / len(all_distance_dict)) #storing rank percentage of true source node
-
-  return evaluate_dictionary
-
-# Function to determine the source using various centrality measures of infected subgraph
-def averaged_centralities(I, true_source_node):
-  prob_dict = dict() # Dictionary with probabilities (value) for each node (key)
-
-  # Degree centrality
-  deg_cent = nx.degree_centrality(I)
-  prob_deg_cent = obtainProbs(I, deg_cent)
-  
-  # Harmonic centrality
-  harmonic_cent = nx.harmonic_centrality(I)
-  prob_harmonic_cent = normalize_dict(harmonic_cent)
-
-  # Updating probabilities
-  prob_dict = aggregate_avg(prob_deg_cent, prob_harmonic_cent)
-
-  # Eigenvector centrality
-  eigen_cent = nx.eigenvector_centrality(I, tol=1.0e-3)
-  prob_eigen_cent = obtainProbs(I, eigen_cent)
-
-  # Updating probabilities
-  prob_dict = aggregate_avg(prob_dict, prob_eigen_cent)
-
-  # Closeness centrality
-  close_cent = nx.closeness_centrality(I)
-  prob_close_cent = obtainProbs(I, close_cent)
-
-  # Updating probabilities
-  prob_dict = aggregate_avg(prob_dict, prob_close_cent)
-  
-  #sorting probabilities dictionary
-  sorted_prob_dict = {k: v for k,v in sorted(prob_dict.items(), key=lambda item: item[1], reverse=True)}
-
-  #storing dictionary of results of method
-  evaluation_results = averaged_cent_results(sorted_prob_dict, I, true_source_node)
-  
-  return evaluation_results
-
-#######################
-### RUN EXPERIMENTS ###
-#######################
-#
 def parallelTests(jobs, func, procs=1): #NOTE: this assumes each job is a tuple
   print("started: parallelTests")
   pool = mp.Pool(processes=procs)
-  results = pool.map_async(func, jobs)
-  # print("set results, getting results")
+  results = pool.map_async(func, [(i,job) for i,job in enumerate(jobs)])
   results = results.get()
-  # print("got results, closing and joining pool")
+  # results = [func((i,j)) for i,j in enumerate(jobs)] #comment out to use multiprocessing
   pool.close()
   pool.join()
 
   data = {} #dictionary to store experiment results
-  for experiment in results: #reorganize and store the results of the experiments in a dictionary
-                             #this should include graph id, random seed, and information about the parameters used to generate the graph and the spread
-    pass
+  for (experiment_id, info) in results:
+    data[experiment_id] = info
   return data
 
-#function to obtain results from rumor centrality method
-def rumorCentrality(I, G, true_source):
-  #storing results from source inference method
-  result_rumor_cent = cosasi.single_source.rumor_centrality(I, G)
+#modified cosasi source code to generate infected
+def get_infected_indices(G, history, step=0):
+  """Retrieves the indices of all vertices in the infected compartment at the provided step.
+  Parameters
+  ----------
+  step : int
+      Iteration step
+  Returns
+  -------
+  list
+  """
+  # nodes = list(G)
 
-  #storing dictionary of evaluation results (true source, distances, rank)
-  evaluation_results = result_rumor_cent.evaluate(true_source)
+  def status_to_delta(status):
+      """Converts the history's status to a vector representing movement in
+      (+1) and out (-1) of the infected compartment
+      Parameters
+      ----------
+      status : dict
+          status dictionary from history, e.g. self.history[step]["status"]
+      """
+      # delta = np.zeros(len(self.G))
+      delta = set()
+      for idx in status:
+          s = status[idx]
+          if s == 1:
+              # node became infected this step
+              # delta[idx] = 1
+              delta.add(idx)
+      return delta
 
-  return evaluation_results
+  if step >= len(history):
+      raise ValueError(
+          "Invalid step. Continue the simulation to reach this step."
+      )
+  # infected = np.zeros(len(self.G))
+  infected = set()
+  for s in range(step + 1):
+      # infected += status_to_delta(self.history[s]["status"])
+      infected = infected.union(status_to_delta(history[s]["status"]))
+  return infected
 
-#function to obtain results from jordan centrality method
-def jordanCentrality(I, G, true_source):
-  #storing results from source inference method
-  result_jordan_cent = cosasi.single_source.jordan_centrality(I, G)
+def get_infected_subgraph(G, history, step=0):
+  """Returns the subgraph of the contact network whose vertices are marked infected.
+  Parameters
+  ----------
+  step : int
+      Iteration step
+  Returns
+  -------
+  NetworkX Graph
+  Notes
+  -----
+  This is only guaranteed to be connected in the SI model.
+  """
+  infected_indices = get_infected_indices(G, history, step=step)
+  not_infected_indices = set(G.nodes) - set(infected_indices)
+  H = G.copy()
+  H.remove_nodes_from(not_infected_indices)
+  return H
 
-  #storing dictionary of evaluation results (true source, distances, rank)
-  evaluation_results = result_jordan_cent.evaluate(true_source)
-
-  return evaluation_results
-
-#function to obtain results from netsleuth method
-def netsleuth(I, G, true_source):
-  #storing results from source inference method
-  result_netsleuth = cosasi.single_source.netsleuth(I, G)
-
-  #storing dictionary of evaluation results (true source, distances, rank)
-  evaluation_results = result_netsleuth.evaluate(true_source)
-
-  return evaluation_results
-
-#function to obtain results from lisn method
-def lisn(I, G, true_source):
-  #storing results from source inference method
-  result_lisn = cosasi.single_source.lisn(I, G)
-
-  #storing dictionary of evaluation results (true source, distances, rank)
-  evaluation_results = result_lisn.evaluate(true_source)
-
-  return evaluation_results
+def genExperimentParameters(graph_models, sizes, betas, num_rand_g_per_type, num_rand_per_beta):
+  graph_types = []
+  for d in graph_models:
+    for s in sizes:
+      c = copy.deepcopy(d)
+      c['params']['n'] = s
+      graph_types.append(c)
+  experiments = []
+  for d in graph_types:
+    for gSeed in np.random.choice(100000, size=num_rand_g_per_type, replace=False):
+      for beta in betas:
+        for sSeed in np.random.choice(100000, size=num_rand_per_beta, replace=False):
+          g = copy.deepcopy(d)
+          g['seed'] = int(gSeed)
+          s = {'source':np.random.choice(g['params']['n']), 'beta':beta, 'seed':int(sSeed)}
+          info = {'graph info': g, 'spread info': s}
+          experiments.append(info)
+  return experiments
 
 #function to run experiments on graphs 
 def runTests(args):
-  # print(args) #test output
+  experiment_id, info = args
+  # print(experiment_id, info['graph info'])
+  G = genGraph(info)
+  info['spread info']['transmission'] = info['spread info']['beta'] * np.mean(G.degree()) #transmission rate of current experiment
+  # characteristic_time = 1 / info['spread info']['transmission'] #time required to reach a fraction of 1/e infected (~36%)
+  top_N_val = 3 #value to use for top-N accuracy
 
-  #unpack the arguments, this will depend on what the jobs look like
-  G, infection_rate, t_max, graphID, graph_type, random_seed, size, avg_deg, graph_param_1, graph_param_2 = args 
-
-  transmission_rate = infection_rate * avg_deg #transmission rate of current experiment
-  spread_seed = np.random.randint(0,999999) #random seed for spread
-
-  #NOTE: this can change
   #pick a random source
   #simulate spread from this source
-  contagion = simSpread(G, infection_rate, t_max) #simulating spread
-  true_source_node = contagion.get_source()[0] #source of spread sim
-  true_source_cosasi = contagion.get_source() #source node in list form (for cosasi methods)
-  I = contagion.get_infected_subgraph(step=t_max) #storing infected subgraph at time-step t_max
-
-  #apply algorithms to estimate/predict patient 0
-  #collect metrics
-  evaluate_rumor_cent = rumorCentrality(I, G, true_source_cosasi)
-  evaluate_jordan_cent = jordanCentrality(I, G, true_source_cosasi)
-  evaluate_netsleuth = netsleuth(I, G, true_source_cosasi)
-  evaluate_lisn = lisn(I, G, true_source_cosasi)
-  evaluate_averaged_cent = averaged_centralities(I, true_source_node)
-
-  #return results
-  results_dict = {'rumor centrality': evaluate_rumor_cent, 'jordan centrality': evaluate_jordan_cent, 'netsleuth': evaluate_netsleuth,
-  'lisn': evaluate_lisn, 'averaged centrality': evaluate_averaged_cent}
-
-#######################
-### SIMULATE SPREAD ###
-#######################
-#
-def simSpread(G, infection_rate, random_seed, t_max): #this will require some parameters, it is worth thinking carefully about how the spread will work
-
-  #implement methods from cosasi package below
-
-  #defining spread model using cosasi package
   contagion = cosasi.StaticNetworkContagion(
     G=G,
     model="si", #simulating SI-model
-    infection_rate=infection_rate,
+    infection_rate=info['spread info']['beta'],
     number_infected=1, #single source node
-    seed=random_seed
+    seed=info['spread info']['seed'] #spread seed
   )
+  #simulating spread for t_ma`x time-steps
+  t_max = 1000 #can be max time_step of interest
+  history = contagion.forward(t_max, verbose=True) ###set to some high number? 1000?
+  # print("finished simulating spread", experiment_id)
 
-  #simulating spread for t_max time-steps
-  contagion.forward(t_max)
+  info['spread info']['source'] = contagion.get_source()[0] #true source of spread
 
-  #returning spread model
-  return contagion 
-
-###############
-### METRICS ###
-###############
-#
-
-#function to generate random BA graphs with given params
-def genGraphsBA(size, m, graph_type):
-
-  random_seed = np.random.randint(0,999999) #random seed to generate graph
-
-  G = nx.barabasi_albert_graph(size, m, random_seed) #generating random BA graph
-
-  #calculating avg degree
-  num_edges = len(G.edges())
-  avg_deg = (2 * num_edges) / size
-
-  return_tuple = tuple((G, graph_type, random_seed, size, avg_deg, m, None)) #tuple to return for experiments list
-
-  #returns a tuple (Graph G, graph_id, random_seed,...)
-  return return_tuple
-
-#function to generate random ER graphs with given params
-def genGraphsER(size, p, graph_type):
-
-  random_seed = np.random.randint(0,999999) #random seed to generate graph
-
-  G = nx.erdos_renyi_graph(size, p, random_seed) #generating random ER graph
-
-  #calculating avg degree
-  num_edges = len(G.edges())
-  avg_deg = (2 * num_edges) / size
-
-  return_tuple = tuple((G, graph_type, random_seed, size, avg_deg, p, None)) #tuple to return for experiments list
-
-  #returns a tuple (Graph G, graph_id, random_seed,...)
-  return return_tuple
-
-#function to generate random WS graphs with given params
-def genGraphsWS(size, k, p, graph_type):
-
-  random_seed = np.random.randint(0,999999) #random seed to generate graph
-
-  G = nx.watts_strogatz_graph(size, k, p, random_seed) #generating random WS graph
-
-  #calculating avg degree
-  num_edges = len(G.edges())
-  avg_deg = (2 * num_edges) / size
-
-  return_tuple = tuple((G, graph_type, random_seed, size, avg_deg, p, k)) #tuple to return for experiments list
-
-  #returns a tuple (Graph G, graph_id, random_seed, m,...)
-  return return_tuple
-
-#function to generate graphs for experiments
-def genGraphs(sizes):
-  print("generating graphs for experiments") #test output
+  #time points at which to observe the graph
+  time_steps = [10, 20, 30]
+  results = {}
+  for time_step in time_steps:
+    I = contagion.get_infected_subgraph(step=time_step) #storing infected subgraph at time-step t_max
+    # I = get_infected_subgraph(G, history, time_step)
   
-  experiment_graphs = [] #list of tuples to return
-  #format of tuples: (graph, graph id, graph type, random seed, size, avg_deg, graph param 1, graph param 2)
-  #graph types: 0 = BA tree, 1 = BA dense, 2 = ER, 3 = WS, 4 = RW_1, 5 = RW_2, etc.
+    #method results
+    rumor_result = rumor_centrality_code.rumor_centrality(I,G)
+    jordan_result = cosasi.single_source.jordan_centrality(I, G)
+    netsleuth_result = cosasi.single_source.netsleuth(I, G)
+    lisn_result = cosasi.single_source.lisn(I, G, t=time_step)
 
-  #variables to track number of random graphs for experiments 
-  num_sizes = len(sizes) #total number of random graph sizes
-  num_rand_g_types = 4 #total number of random graph types (BA tree, BA dense, ER, WS)
-  num_rand_g_per_size = 100 #total number of random graphs per size
-  num_rand_g_per_type = num_sizes * num_rand_g_per_size #total number of graphs per randon graph type
-  total_rand_graphs = num_rand_g_per_type * num_rand_g_types #total number of graphs to generate
+    #inferred source for each method 
+    rumor_source = rumor_result.rank()[0]
+    jordan_source = jordan_result.rank()[0]
+    netsleuth_source = netsleuth_result.rank()[0]
+    lisn_source = lisn_result.rank()[0]
 
-  graph_id = 0 #stores graph_id which relates to graph type
+    #scores for each method
+    rumor_scores = rumor_result.data['scores']
+    jordan_scores = jordan_result.data['scores']
+    netsleuth_scores = netsleuth_result.data['scores']
+    lisn_scores = lisn_result.data['scores']
 
-  graph_type = 0 #current graph type being generated
-
-  #while loop to generate random graphs
-  while graph_id < total_rand_graphs:
-
-    #loop to create graph of each size listed
-    for size in sizes:
-
-      # loop to create (num_rand_g_per_size) graphs for each size
-      for iter in range(num_rand_g_per_size):
-
-        #if-else statements to create graph type based on graph_id
-        if (graph_id in range(0,num_rand_g_per_type)): #BA (tree)
-          m = 1 #m-value for BA tree graph
-          
-          #updating experiments list with new tuple
-          experiment_graphs.append(genGraphsBA(size, m, graph_id, graph_type))
-        
-        elif(graph_id in range(num_rand_g_per_type,2*num_rand_g_per_type)): #BA (dense)
-          m = 3 #m-value for BA dense graph
-
-          #updating experiments list with new tuple
-          experiment_graphs.append(genGraphsBA(size, m, graph_id, graph_type))
-
-        elif(graph_id in range(2*num_rand_g_per_type,3*num_rand_g_per_type)): #ER
-          p = (math.log(size) + 1) / size #setting p-value to be in connected regime
-          
-          #updating experiments list with new tuple
-          experiment_graphs.append(genGraphsER(size, p, graph_id, graph_type))
-
-        elif(graph_id in range(3*num_rand_g_per_type,4*num_rand_g_per_type)): #WS
-          #parameter values for WS model
-          p = 0.4
-          k = 4
-
-          #updating experiments list with new tuple
-          experiment_graphs.append(genGraphsWS(size, k, p, graph_id, graph_type))
-
-        graph_id += 1 #incrementing graph_id
+    #dictionary for each method with relevant metrics (result object, top-1 accuracy, top-N accuracy, distance, rank of true source)
+    rumor_dict = {'result': rumor_result,
+                  'estimated source': rumor_source,
+                  'top-1': True if rumor_source == info['spread info']['source'] else False,
+                  'top-N': True if rumor_source in rumor_result.topn(top_N_val) else False,
+                  'distance': nx.shortest_path_length(I, rumor_source, info['spread info']['source']),
+                  'rank': rumor_result.evaluate_solution_rank(info['spread info']['source']),
+                  'scores': rumor_scores} 
+    jordan_dict = {'result': jordan_result, 
+                   'estimated source': jordan_source,
+                   'top-1': True if jordan_source == info['spread info']['source'] else False,
+                   'top-N': True if jordan_source in jordan_result.topn(top_N_val) else False,
+                   'distance': nx.shortest_path_length(I, jordan_source, info['spread info']['source']),
+                   'rank': jordan_result.evaluate_solution_rank(info['spread info']['source']),
+                   'scores': jordan_scores}
+    netsleuth_dict = {'result': netsleuth_result, 
+                      'estimated source': netsleuth_source,
+                      'top-1': True if netsleuth_source == info['spread info']['source'] else False,
+                      'top-N': True if netsleuth_source in netsleuth_result.topn(top_N_val) else False,
+                      'distance': nx.shortest_path_length(I, netsleuth_source, info['spread info']['source']),
+                      'rank': netsleuth_result.evaluate_solution_rank(info['spread info']['source']),
+                      'scores': netsleuth_scores}
+    lisn_dict = {'result': lisn_result, 
+                 'estimated source': lisn_source,
+                 'top-1': True if lisn_source == info['spread info']['source'] else False,
+                 'top-N': True if lisn_source in lisn_result.topn(top_N_val) else False,
+                 'distance': nx.shortest_path_length(I, lisn_source, info['spread info']['source']),
+                 'rank': lisn_result.evaluate_solution_rank(info['spread info']['source']),
+                 'scores': lisn_scores}
     
-    #sanity check
-    print("finished generating graph type:", graph_type)
-    graph_type += 1 #incrementing graph type
+    results[time_step] = {'rumor': rumor_dict,
+                          'jordan': jordan_dict,
+                          'netsleuth': netsleuth_dict,
+                          'lisn': lisn_dict}
 
-  #generating real-world networks (FB wall posts, US airport, power grid)
+    # results[time_step] = {'rumor': rumor_centrality_code.rumor_centrality(I,G),
+    #                       'jordan': cosasi.single_source.jordan_centrality(I, G),
+    #                       'netsleuth': cosasi.single_source.netsleuth(I, G),
+    #                       'lisn': cosasi.single_source.lisn(I, G, t=time_step)} #do we need to specify t here? (documentation says optional, but throws error if not specified)
+  #for now, results for each method could be, for example, probability that each node is the source... we can do post processing later
+      
+  #apply algorithms to estimate/predict patient 0
+  #collect metrics
+  #return results
 
-  #Facebook wall posts network (largest connected component)
-  #reading in FB network data using pandas
-  df = pd.read_csv("facebook-wosn-wall/out.facebook-wosn-wall", header=None, delimiter='\s+')
-  df.drop(df.columns[[2, 3]], axis = 1, inplace=True) #dropping last two columns
-  #generating network from dataframe (edge list)
-  FB_graph = nx.from_pandas_edgelist(df, source=0, target=1, edge_attr=None, create_using=nx.Graph)
-  #induced subgraph of largest connected component
-  FB_lcc = FB_graph.subgraph(max(nx.connected_components(FB_graph), key=len))
-  #calculating avg degree
-  num_edges = len(FB_lcc.edges())
-  avg_deg = (2 * num_edges) / size
-  #adding FB graph to experiment graph list
-  experiment_graphs.append(tuple((FB_lcc, graph_id, graph_type, None, len(FB_lcc), avg_deg, None, None))) 
-  #sanity check
-  print("finished generating graph type:", graph_type)
-  graph_id += 1 #incrementing graph_id
-  graph_type += 1 #incrementing graph type
+  info['results'] = results
+  # print(experiment_id, info['results'])
+  print(experiment_id)
+  return (experiment_id, info)
 
-  #US airport network
-  #reading in airport network data using pandas
-  df = pd.read_csv("opsahl-usairport/out.opsahl-usairport", header=None, delimiter='\s+')
-  df.drop(df.columns[[2]], axis = 1, inplace=True) #dropping last two columns
-  #generating network from dataframe (edge list)
-  us_airport_graph = nx.from_pandas_edgelist(df, source=0, target=1, edge_attr=None, create_using=nx.Graph)
-  #calculating avg degree
-  num_edges = len(us_airport_graph.edges())
-  avg_deg = (2 * num_edges) / size
-  #adding power grid graph to experiment graph list
-  experiment_graphs.append(tuple((us_airport_graph, graph_id, graph_type, None, len(us_airport_graph), avg_deg, None, None)))
-  #sanity check
-  print("finished generating graph type:", graph_type)
-  graph_id += 1 #incrementing graph_id
-  graph_type += 1 #incrementing graph type
+#function to read in real world graphs
+def readGraph(type):
+  G = nx.Graph() #graph to return
 
-  #power grid network
-  #reading in the power grid graph
-  power_grid_graph = nx.read_gml("power/power.gml", label='id')
-  #calculating avg degree
-  num_edges = len(power_grid_graph.edges())
-  avg_deg = (2 * num_edges) / size
-  #adding power grid graph to experiment graph list
-  experiment_graphs.append(tuple((power_grid_graph, graph_id, graph_type, None, len(power_grid_graph), avg_deg, None, None)))
-  #sanity check
-  print("finished generating graph type:", graph_type)
-  graph_id += 1 #incrementing graph_id
-  graph_type += 1 #incrementing graph type
-
-  #returns list of tuples with relevant graph info
-  return experiment_graphs
-
-#function to generate a graph for experiments given a size and type
-def genGraph(size, type):
-  #format of tuples: (graph, graph type, random seed, size, avg_deg, graph param 1, graph param 2)
-  #graph types: 0 = BA tree, 1 = BA dense, 2 = ER, 3 = WS, 4 = RW_1, 5 = RW_2, 6 = RW_3, etc.
-  graph_info = tuple() #tuple to return containing relevant graph informationx
-
-  #if-else statements to create graph type based on graph_id
-  if (type == 0): #BA (tree)
-    m = 1 #m-value for BA tree graph
-    
-    #updating experiments list with new tuple
-    graph_info = genGraphsBA(size, m, type)
-  elif(type == 1): #BA (dense)
-    m = 3 #m-value for BA dense graph
-
-    #updating experiments list with new tuple
-    graph_info = genGraphsBA(size, m, type)
-  elif(type == 2): #ER
-    p = (math.log(size) + 1) / size #setting p-value to be in connected regime
-    
-    #updating experiments list with new tuple
-    graph_info = genGraphsER(size, p, type)
-  elif(type == 3): #WS
-    #parameter values for WS model
-    p = 0.4
-    k = 4
-
-    #updating experiments list with new tuple
-    graph_info = genGraphsWS(size, k, p, type)
-  #generating real-world networks (FB wall posts, US airport, power grid)
-  elif(type == 4): #Facebook wall posts network (largest connected component)
+  if (type == 'fb'): #Facebook wall posts network (largest connected component)
     #reading in FB network data using pandas
     df = pd.read_csv("facebook-wosn-wall/out.facebook-wosn-wall", header=None, delimiter='\s+')
     df.drop(df.columns[[2, 3]], axis = 1, inplace=True) #dropping last two columns
     #generating network from dataframe (edge list)
     FB_graph = nx.from_pandas_edgelist(df, source=0, target=1, edge_attr=None, create_using=nx.Graph)
     #induced subgraph of largest connected component
-    FB_lcc = FB_graph.subgraph(max(nx.connected_components(FB_graph), key=len))
-    #calculating avg degree
-    num_edges = len(FB_lcc.edges())
-    avg_deg = (2 * num_edges) / len(FB_lcc)
-    #adding FB graph to experiment graph list
-    graph_info = tuple((FB_lcc, type, None, len(FB_lcc), avg_deg, None, None))
-  elif(type == 5): #US airport network
+    fb_LCC = FB_graph.subgraph(max(nx.connected_components(FB_graph), key=len))
+    G = nx.convert_node_labels_to_integers(fb_LCC) #updating node labels
+  elif(type == 'ap'): #US airport network
     #reading in airport network data using pandas
     df = pd.read_csv("opsahl-usairport/out.opsahl-usairport", header=None, delimiter='\s+')
     df.drop(df.columns[[2]], axis = 1, inplace=True) #dropping last two columns
-    #generating network from dataframe (edge list)
-    us_airport_graph = nx.from_pandas_edgelist(df, source=0, target=1, edge_attr=None, create_using=nx.Graph)
-    #calculating avg degree
-    num_edges = len(us_airport_graph.edges())
-    avg_deg = (2 * num_edges) / len(us_airport_graph)
-    #adding power grid graph to experiment graph list
-    graph_info = tuple((us_airport_graph, type, None, len(us_airport_graph), avg_deg, None, None))
-  elif(type == 6): #power grid network
+    #generating network using pandas dataframe (edge list)
+    airport_graph = nx.from_pandas_edgelist(df, source=0, target=1, edge_attr=None, create_using=nx.Graph)
+    airport_LCC = airport_graph.subgraph(max(nx.connected_components(airport_graph), key=len))
+    G = nx.convert_node_labels_to_integers(airport_LCC) #updating node labels
+  elif(type == 'pg'): #power grid network
     #reading in the power grid graph
-    power_grid_graph = nx.read_gml("power/power.gml", label='id')
-    #calculating avg degree
-    num_edges = len(power_grid_graph.edges())
-    avg_deg = (2 * num_edges) / len(power_grid_graph)
-    #adding power grid graph to experiment graph list
-    graph_info = tuple((power_grid_graph, type, None, len(power_grid_graph), avg_deg, None, None))
-
-  #returns tuple with relevant graph info
-  return graph_info
-
-#function to return list of infection rates to simulate
-def getInfectionRates(max_infection_rate, inf_rate_increments):
-
-  multiplier = 1 #multiplier to set upper bound for range
-  range_upper_bound = max_infection_rate #upper bound for range
-
-  #updating multiplier
-  while(int(multiplier * inf_rate_increments) == 0):
-    multiplier *= 10
-
-  #updating upper bound for range
-  while(type(range_upper_bound) != int):
-    range_upper_bound *= multiplier
-    if (int(range_upper_bound) != 0):
-        range_upper_bound = int(range_upper_bound)
-        break
-
-  range_upper_bound += 1 #incremnting upper bound
-
-  #setting infection rates
-  infection_rates = [(x * inf_rate_increments) for x in range(1, range_upper_bound)]
-
-  # print(infection_rates) #test output
-
-  return infection_rates
-
-#function to generate list of tuples for experiments
-def setupExperiments(time_steps, infection_rates, sizes):
-
-  experiments_list = [] #list of tuples with parameters for each experiments
-
-  experiments_per_params = 10 #number of experiments for each set of parameters
-
-  experiment_id = 0 #unique id for each experiment set of parameters
-  num_rand_graph_types = 4 #number of random graph types
-  total_graph_types = 7 #total number of graph types
-
-  #nested for loops to store sets of parameters for random graphs
-  for curr_type in range(num_rand_graph_types): #random graph type
-    for size in sizes: #random graph sizes
-      for beta in infection_rates: #infection rate for sim
-        for t_max in time_steps: #t_max for sim
-          for iter in range(experiments_per_params): #number of experiments for each parameter set
-            #generating tuple with graph info (graph, type, size, seed, avg_deg, param_1, param_2)
-            graph_tuple = genGraph(size, curr_type) 
-
-            #tuple with experiment parameters (exp ID, graph info, t_max, infection rate)
-            experiment_params = (experiment_id, graph_tuple, t_max, beta)
-            experiment_id += 1 #incrementing experiments id
-            experiments_list.append(experiment_params) #updating list with experiment tuples
-            print(experiment_params) #test
-
-  #nested for loops to store sets of parameters for real-world graphs
-  for curr_type in range(num_rand_graph_types, total_graph_types): #random graph type
-    for beta in infection_rates: #infection rate for sim
-      for t_max in time_steps: #t_max for sim
-        for iter in range(experiments_per_params): #number of experiments for each parameter set
-          #generating tuple with graph info (graph, type, size, seed, avg_deg, param_1, param_2)
-          graph_tuple = genGraph(None, curr_type) 
-
-          #tuple with experiment parameters (exp ID, graph info, t_max, infection rate)
-          experiment_params = (experiment_id, graph_tuple, t_max, beta)
-          experiment_id += 1 #incrementing experiments id
-          experiments_list.append(experiment_params) #updating list with experiment tuples
-          print(experiment_params) #test
+    G = nx.read_gml("power/power.gml", label='id')
   
-  return experiments_list
+  return G
 
-#main
+def genGraph(info):
+  if info['graph info']['type'][:2] == 'ba': 
+    G = nx.barabasi_albert_graph(info['graph info']['params']['n'],
+                                 info['graph info']['params']['m'],
+                                 seed=info['graph info']['seed'])
+  elif info['graph info']['type'][:2] == 'er': 
+    er_G = nx.erdos_renyi_graph(info['graph info']['params']['n'],
+                                info['graph info']['params']['p'](info['graph info']['params']['n']),
+                                seed=info['graph info']['seed'])
+    er_LCC = er_G.subgraph(max(nx.connected_components(er_G), key=len)) #using largest connected component of er graph
+    G = nx.convert_node_labels_to_integers(er_LCC) #updating node labels
+  elif info['graph info']['type'][:2] == 'ws': 
+    G = nx.watts_strogatz_graph(info['graph info']['params']['n'],
+                                info['graph info']['params']['k'],
+                                info['graph info']['params']['p'],
+                                seed=info['graph info']['seed'])
+  else: G = readGraph(info['graph info']['type']) #function to read world graph in
+  #update 'n' parameter in info for real world graphs?
+  return G
+
+def connectedProb(n):
+  return (np.log(n) + 1) / n
+
 if __name__=='__main__':
-  outFile = 'patient_zero_data.dict'
-  data = readDict(outFile) if glob.glob(outFile) else {}
+  graph_models = [{'type':'ba_1', 'params':{'m':1}},
+                  {'type':'ba_3', 'params':{'m':3}},
+                  {'type':'er', 'params':{'p':connectedProb}},
+                  {'type':'ws_', 'params':{'p':0.01, 'k':4}}]
+                  # {'type':'fb', 'params':{}},
+                  # {'type':'ap', 'params':{}},
+                  # {'type':'pg', 'params':{}}]
+  sizes = [100, 250, 500]#, 5000, 10000]
+  betas = [0.1, 0.2, 0.3, 0.4, 0.5] #or should this be a function of e.g. <k> or size?
+  num_rand_g_per_type = 17
+  num_rand_per_beta = 4
+  experiments = genExperimentParameters(graph_models, sizes, betas, num_rand_g_per_type, num_rand_per_beta)
+  graph_count = 0
 
-  #parameters relevant to the experiments that you want to run
-  sizes = [100, 500, 1000, 5000, 10000] #sizes of graphs
-  t_max = 10 #max time step to sim spread
-  time_steps = [t for t in range (0,t_max)] #range of time steps to sim spread
-  max_infection_rate = 0.9 #max infection rate (less than 1)
-  inf_rate_increments = 0.1 #increments of infection rates from zero to max-rate
-  infection_rates = getInfectionRates(max_infection_rate, inf_rate_increments) #infection rates
-  
-  repeats = 10
-  procs = 1
+  print(len(experiments))
 
-  #list of tuples with parameters for each experiment
-  # experiments_list = setupExperiments(time_steps, infection_rates, sizes) 
-
-  # experiment_dict = {"graphs": experiments_list} #dictionary of graphs to experiment on
-  # writeDict(experiment_dict, "experiment_dict.pickle") #saving graph dictionary to pickle file to avoid regeneration of graphs
-
-  #test output
-  # for exp in experiments_list:
-  #   print(exp)
-
-  #a list of random graphs generated using the parameters above along with other relevant information
-  #for each random graph, it might be a good idea to use a specific random seed so that experiments are reproducible
-  #a different seed for each graph can be generated with something like np.random.randint(0,999999)
-  #these can be tuples that looks something like (graph id, random seed, ...)
-  # experiment_graphs = genGraphs(sizes) #calling function to generate graphs to experiment on
-  # print("finished generating graphs for experiments") #test output
-
-  #test output
-  # for exp in experiment_graphs:
-  #   print(exp)
-
-  # graph_dict = {"graphs": experiment_graphs} #dictionary of graphs to experiment on
-  # writeDict(graph_dict, "graph_dict.pickle") #saving graph dictionary to pickle file to avoid regeneration of graphs
-
-  # writeDict_lzma(graph_dict, "graph_dictionary.xz") #saving graph dictionary to pickle file to avoid regeneration of graphs
-
-  # print("storing graph dictionary from stored pickle file") #test output
-  # graph_dict = readDict("graph_dict.pickle") #obtaining graph dicitonary in pickle file
-  # experiment_graphs = graph_dict["graphs"] #storing graphs to experiment on from graph dictionary
-  # print("stored graph dictionary/list") #test output
-  
-  #test output
-  # for graph in experiment_graphs:
-  #   print(graph)
+  # for e in experiments: 
+  #   print(e)
 
 
-  # newData = parallelTests(experiments_list, runTests, procs=procs)
-  pass
+  # procs = 4
+  # procs = mp.cpu_count() - 1
+  # data = parallelTests(experiments, runTests, procs=procs)
+  # for e in data: print(e, data[e])
+
+  # writeDict(data, "synthetic_experiments_2.pickle")
+  # d = readDict("synthetic_graph_experiments.pickle")
+  # for item in d.items():
+  #   print(item)
